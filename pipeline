@@ -1,0 +1,359 @@
+/*
+* THIS IS AN JENKINS DSL SCRIPT FOR DEFINE THE DEPLOYMENT PIPELINES
+*/
+
+// define the projects list
+projects = ['smoke', 'every', 'nightly', 'needle']
+
+def smokeOnEcho(def server_address) {
+    // build smoke tests for specified project
+
+    def sms_pipeline = [:]
+    sms = ['smoke']
+
+    for (int i = 0; i < sms.size(); i++) {
+        def proj = server_address
+        // add the projects for parallel run tests build
+        sms_pipeline["Smoke against Echo: ${proj}"] = {
+            p = build job: "Automation Smoke against ECHO", parameters:[string(name:"TEST_SERVER_ADDRESS", value:server_address)]
+            if (p.result != 'SUCCESS') {
+                error "Build failed"
+            }
+        }
+    }
+    parallel sms_pipeline
+}
+
+def GenericFT(def server_address) {
+    // build smoke tests for specified project
+
+    def sms_pipeline = [:]
+    sms = ['every']
+
+    for (int i = 0; i < sms.size(); i++) {
+        def proj = server_address
+        // add the projects for parallel run tests build
+        sms_pipeline["Automation Every Build against VICTOR: ${proj}"] = {
+            p = build job: "Automation Every Build against VICTOR", parameters:[string(name:"TEST_SERVER_ADDRESS", value:server_address)]
+            if (p.result != 'SUCCESS') {
+                error "Build failed"
+            }
+        }
+    }
+    parallel sms_pipeline
+}
+
+def CommunicationFT(def server_address) {
+    // build smoke tests for specified project
+
+    def sms_pipeline = [:]
+    sms = ['every']
+
+    for (int i = 0; i < sms.size(); i++) {
+        def proj = server_address
+        // add the projects for parallel run tests build
+        sms_pipeline["Automation communication against VICTOR: ${proj}"] = {
+            p = build job: "Automation communication against VICTOR", parameters:[string(name:"TEST_SERVER_ADDRESS", value:server_address)]
+            if (p.result != 'SUCCESS') {
+                error "Build failed"
+            }
+        }
+    }
+    parallel sms_pipeline
+}
+
+def everybuild(def address) {
+    /* Define the deployment pipelines for every build
+     */
+
+    node("master") {
+        timestamps {
+            try {
+                stage('Echo Somke') {
+                    smokeOnEcho(address)
+                }
+
+                // set build result to success if no errors
+                currentBuild.result = currentBuild.result ?: 'SUCCESS'
+            } catch (e) {
+                currentBuild.result = currentBuild.result ?: 'FAILURE'
+            }
+        }
+    }
+    node("master") {
+        timestamps {
+             try {
+                stage('Victor GenericFT') {
+                    GenericFT(address)
+                }
+
+                // set build result to success if no errors
+                currentBuild.result = currentBuild.result ?: 'SUCCESS'
+            } catch (e) {
+                currentBuild.result = currentBuild.result ?: 'FAILURE'
+            }
+        }
+    }
+        node("master") {
+        timestamps {
+             try {
+                stage('Communication') {
+                    CommunicationFT(address)
+                }
+
+                // set build result to success if no errors
+                currentBuild.result = currentBuild.result ?: 'SUCCESS'
+            } catch (e) {
+                currentBuild.result = currentBuild.result ?: 'FAILURE'
+            }
+        }
+    }
+}
+
+
+/*
+* Slack notification sending utility
+*/
+
+import jenkins.model.*
+import hudson.model.*
+import com.cloudbees.jenkins.plugins.*
+import com.cloudbees.groovy.cps.NonCPS
+import hudson.tasks.test.AbstractTestResultAction
+
+
+@NonCPS
+def notifyBuild(buildStatus, notifyRoles=[:], slackChannel="#ci") {
+
+    /*
+      Slack Notify Build Function
+      Notify Rules:
+      * To channel
+          1) Always send the notification
+      * To person
+          1) Done but not suppose to use until the requirement been listed
+    */
+
+    try {
+        env.BUILD_STATUS = buildStatus ?: 'STARTED'              // set default of build status
+        env.JOB_DISPLAYNAME = Jenkins.instance.getJob("${env.JOB_NAME}").displayName          // set the job display name
+        env.PREVIOUS_BUILD_RESULT = currentBuild.rawBuild.getPreviousBuild()?.getResult().toString()           // get the previous build result
+        env.CHANGES_URL = "${env.BUILD_URL}changes"
+        colorMap = ['STARTED': '#F0FFFF', 'SUCCESS': '#008B00', 'FAILURE': '#FF0000', 'UNSTABLE': '#EEC900']   // get colorName for slack notify
+        colorName = colorMap["${env.BUILD_STATUS}"]
+        sendChannel = ''
+
+        // get the triggered current build jenkins or github username
+        def buildUser =  getOriginBuildCauseUser()
+        // get the commit author from changes or use buildUser instead if empty
+        def commitUsers = currentBuild.rawBuild.changeSets ? getCommitUsers() : [buildUser]
+        // set the changes messages or set no changes
+        def changesMsg = currentBuild.rawBuild.changeSets ? "${env.CHANGES_URL}\nChange authors: ${commitUsers}" : "No changes."
+        // set slack notify subject and summary
+        def subject = "Pipeline: ${env.JOB_DISPLAYNAME} - #${env.BUILD_NUMBER} ${env.BUILD_STATUS}"
+        def summary = "${subject} (${env.BUILD_URL}) triggered by ${buildUser}\nChanges: ${changesMsg}"
+
+        // set the default notify roles
+        def defaultRoles = ['Channel': ['OnlyChange'], 'Personal': []]
+        // get the notify rules or using the default one
+        notifyRoles = notifyRoles ?: defaultRoles
+        // get the notification mark for where and who
+        sendMarks = notifyRulesParser(notifyRoles)
+
+        // send the notifications to channel
+        if (sendMarks.toChannel) {
+            println "Sending slack notification to channel: ${slackChannel}"
+            sendChannel += slackChannel
+        }
+
+        // send the notifications to commit author
+        if (sendMarks.toPersonal) {
+            sendChannel += ' @' + commitUsers.join(' @')
+            println "Sending slack notification to person: ${commitUsers}"
+        }
+
+        // will not send the notifications
+        if (!sendMarks.toPersonal & !sendMarks.toChannel) {
+            println "Will not sending slack notifications, based on the rules:\n"
+            println notifyRoles
+        } else {
+            slackSend(color: "${colorName}", message: "${summary}", channel: "${sendChannel}")
+        }
+    } catch (e) {
+        println "Sending notification failed"
+        error e
+    }
+}
+
+
+@NonCPS
+def notifyRulesParser(rules) {
+    /*
+    Parse for where to send the notifications slack channel or direct messages to person.
+     */
+    def toChannel = false
+    def toPersonal = false
+
+    println 'Parsing the notify rules...'
+    // if send to channel
+    if (rules.Channel) {
+        if (rules.Channel.contains("Always")) {
+            toChannel = true
+        } else if (rules.Channel.contains("OnlyChange")) {
+            if ("${env.BUILD_STATUS}" != "${env.PREVIOUS_BUILD_RESULT}") {
+                toChannel = true
+            }
+        }
+    }
+    // if send the DM to person
+    if (rules.Personal) {
+        if (rules.Personal.contains("Always")) {
+            toPersonal = true
+        } else if (rules.Personal.contains("OnlyFail")) {
+            if (env.BUILD_STATUS != 'SUCCESS') {
+                toPersonal = true
+            }
+        }
+    }
+    return ['toChannel': toChannel, 'toPersonal': toPersonal]
+}
+
+
+@NonCPS
+def getOriginBuildCauseUser(buildCause = '') {
+
+    // get the first build case if didn't specify the cause
+    buildCause = buildCause ?: currentBuild.rawBuild.getCauses()[0]
+
+    try {
+        // get the original cause if build caused by upstream
+        if (buildCause.class.toString().contains("UpstreamCause") && buildCause.getUpstreamCauses() != null) {
+            println 'Identified caused by upstream job, getting original cause...'
+            for (upCause in buildCause.getUpstreamCauses()) {
+                buildUser = getOriginBuildCauseUser(upCause)
+            }
+        } else {
+            // get the none upstream build cause
+            if (buildCause.toString().contains("GitHubPushCause")) {
+                println 'Identified caused by GitHub push...'
+                // get build cause if it caused by GitHub push
+                causeReason = buildCause.getShortDescription()
+                githubUserName = causeReason.substring(causeReason.lastIndexOf("by") + 3, causeReason.length())
+                buildUser = getUserIdentity(githubUserName)
+            } else {
+                // get the user who kicked off the build.
+                def id = buildCause.getUserId()
+                buildUser = getUserIdentity(id)
+            }
+        }
+        return buildUser
+    } catch (e) {
+        println "Getting the origin build cause failed!"
+        throw e
+    }
+}
+
+
+@NonCPS
+def getCommitUsers() {
+    /*
+    Get the current build change logs.
+     */
+    def changeLogs = []
+    def changeLogSets = currentBuild.rawBuild.changeSets
+
+    println 'Getting current build change logs...'
+    try {
+        for (int i = 0; i < changeLogSets.size(); i++) {
+            def entries = changeLogSets[i].items
+            for (int j = 0; j < entries.length; j++) {
+                def entry = entries[j]
+                def userIdentity = getUserIdentity("${entry.author}")
+                if (!changeLogs.contains("${userIdentity}")) {
+                    changeLogs.add("${userIdentity}")
+                }
+            }
+        }
+        return changeLogs
+    } catch (e) {
+        println "Get current build change logs failed."
+        error e
+    }
+}
+
+
+@NonCPS
+def getUserIdentity(idOrName) {
+    /*
+    *  Getting the user identity which set on People -> User -> Edit -> "Additional user identities"
+    *  return the user identity or the jenkins username if identity doesn't exists.
+    */
+    def userIdentity
+    try {
+        def u = User.get(idOrName)
+        if (u.getProperty(AdditionalIdentities.class) != null) {
+            userIdentity = u.getProperty(AdditionalIdentities.class).getIdentities()[0].getId().toString()
+        }
+        userIdentity = userIdentity ?: u.getFullName().toString()
+        return userIdentity
+    } catch (e) {
+        println "Getting user identity failed."
+        throw e
+    }
+}
+
+@NonCPS
+def testStatuses() {
+    def testStatus = ""
+    AbstractTestResultAction testResultAction = currentBuild.rawBuild.getAction(AbstractTestResultAction.class)
+    if (testResultAction != null) {
+        def total = testResultAction.totalCount
+        def failed = testResultAction.failCount
+        def skipped = testResultAction.skipCount
+        def passed = total - failed - skipped
+        testStatus = "Test Status:\n  Passed: ${passed}, Failed: ${failed} ${testResultAction.failureDiffString}, Skipped: ${skipped}"
+
+        if (failed == 0) {
+            testStatus = "Test Status:\n  Passed: ${passed}, Failed: ${failed} ${testResultAction.failureDiffString}, Skipped: ${skipped}"
+            currentBuild.result = 'SUCCESS'
+        }
+    }
+    return testStatus
+}
+
+
+
+/*
+* Slack notification sending utility
+*/
+
+
+
+@NonCPS
+def testStatuses() {
+    def testStatus = ""
+    ResultAction = currentBuild.rawBuild.getAction(AbstractTestResultAction.class)
+    echo "$ResultAction"
+    testResultAction = currentBuild.rawBuild.getActions(AbstractTestResultAction.class)
+    echo "$testResultAction"
+    if (testResultAction != null) {
+        def total = testResultAction.totalCount
+        def failed = testResultAction.failCount
+        def skipped = testResultAction.skipCount
+        def passed = total - failed - skipped
+        echo "Total: $total"
+        echo "Failed: $failed"
+        echo "Skipped: $skipped"
+        echo "Passed: $passed"
+        testStatus = "Test Status:\n  Passed: $passed, Failed: $failed ${testResultAction.failureDiffString}, Skipped: $skipped"
+
+        if (failed == 0) {
+            testStatus = "Test Status:\n  Passed: $passed, Failed: $failed ${testResultAction.failureDiffString}, Skipped: $skipped"
+            currentBuild.result = 'SUCCESS'
+        }
+    }
+    return testStatus
+}
+
+
+everybuild("${TEST_SERVER_ADDRESS}")
