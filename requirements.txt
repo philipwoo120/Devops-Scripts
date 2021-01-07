@@ -34,7 +34,7 @@ Jinja2==2.9.6
 junit-xml==1.8
 linecache2==1.0.0
 locustio==0.8.1
-lxml==4.1.0
+lxml==4.6.2
 Mako==1.0.7
 MarkupSafe==1.0
 matplotlib==2.1.0
